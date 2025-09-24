@@ -109,36 +109,72 @@ def stop_listener(solver):
             break
 
 class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
-    """Prints intermediate solutions and statistics."""
+    """Prints intermediate solutions, statistics, and exports to Excel."""
 
-    def __init__(self, total_overload, total_distance, num_splits=None):
+    def __init__(self, variables):
         cp_model.CpSolverSolutionCallback.__init__(self)
-        self._total_overload = total_overload
-        self._total_distance = total_distance
-        self._num_splits = num_splits
+        self._vars = variables
         self._start_time = time.time()
         self._last_print_time = self._start_time
 
     def on_solution_callback(self):
         current_time = time.time()
-        if current_time - self._last_print_time > 5.0: # Print at most every 5 seconds
+        if current_time - self._last_print_time > 5.0: # Checkpoint every 5 seconds
             self._last_print_time = current_time
             
-            ol = self.Value(self._total_overload)
+            # --- Print progress to console ---
+            ol = self.Value(self._vars['total_overload'])
             ol_penalty = ol * OVERLOAD_WEIGHT
-            dist = self.Value(self._total_distance)
+            dist = self.Value(self._vars['total_distance'])
             dist_penalty = dist * DISTANCE_PENALTY_WEIGHT
             
-            # Use carriage return to keep output on the same block of lines
-            # and flush to ensure it prints immediately.
             print(f"  > Progress ({current_time - self._start_time:.1f}s):", flush=True)
             print(f"    - Overload: {ol_penalty:>10,} penalty ({ol:,} kW)      ", flush=True)
             print(f"    - Distance: {dist_penalty:>10,} penalty ({dist:,} units)      ", flush=True)
 
-            if self._num_splits is not None:
-                splits = self.Value(self._num_splits)
+            if 'num_splits' in self._vars:
+                splits = self.Value(self._vars['num_splits'])
                 split_penalty = splits * SPLIT_PENALTY_WEIGHT
-                print(f"    - Splits:   {split_penalty:>10,} penalty ({splits:,} splits)")
+                print(f"    - Splits:   {split_penalty:>10,} penalty ({splits:,} splits)      ", flush=True)
+            
+            # --- Reconstruct solution and export to Excel ---
+            solution = []
+            # Check for a variable that ONLY exists in the split-mode solver
+            if 'is_unsplit' in self._vars:
+                # Full reconstruction for split mode (Phase 2)
+                for r in RACK_IDS:
+                    row_sol = {'rack': r}
+                    if self.Value(self._vars['is_unsplit'][r]):
+                        for p, c in ALL_CIRCUITS:
+                            if self.Value(self._vars['u_prim'][(r,p,c)]): row_sol['prim'] = (p,c)
+                            if self.Value(self._vars['u_sec'][(r,p,c)]): row_sol['sec'] = (p,c)
+                    elif self.Value(self._vars['is_prim_split'][r]):
+                        row_sol['split_at'] = self.Value(self._vars['split_point'][r])
+                        for p, c in ALL_CIRCUITS:
+                            if self.Value(self._vars['ps_p1'][(r,p,c)]): row_sol['prim_1'] = (p,c)
+                            if self.Value(self._vars['ps_p2'][(r,p,c)]): row_sol['prim_2'] = (p,c)
+                            if self.Value(self._vars['ps_s'][(r,p,c)]): row_sol['sec'] = (p,c)
+                    elif self.Value(self._vars['is_sec_split'][r]):
+                        row_sol['split_at'] = self.Value(self._vars['split_point'][r])
+                        for p, c in ALL_CIRCUITS:
+                            if self.Value(self._vars['ss_p'][(r,p,c)]): row_sol['prim'] = (p,c)
+                            if self.Value(self._vars['ss_s1'][(r,p,c)]): row_sol['sec_1'] = (p,c)
+                            if self.Value(self._vars['ss_s2'][(r,p,c)]): row_sol['sec_2'] = (p,c)
+                    solution.append(row_sol)
+            else:
+                # Simpler reconstruction for no-split mode (Phase 1 or no-split run)
+                for r in RACK_IDS:
+                    prim_pdu, prim_c, sec_pdu, sec_c = (None, None, None, None)
+                    for p, c in ALL_CIRCUITS:
+                        if self.Value(self._vars['primary'][(r,p,c)]): prim_pdu, prim_c = p, c
+                        if self.Value(self._vars['secondary'][(r,p,c)]): sec_pdu, sec_c = p, c
+                    solution.append({
+                        'rack': r, 'prim': (prim_pdu, prim_c), 'sec': (sec_pdu, sec_c),
+                        'prim_pdu': prim_pdu, 'prim_circuit': prim_c, 
+                        'sec_pdu': sec_pdu, 'sec_circuit': sec_c
+                    })
+            
+            generate_excel_output(solution, is_intermediate=True)
 
 def solve_no_split(time_limit_seconds):
     """Phase 1: Finds the best possible solution without using splits."""
@@ -232,8 +268,14 @@ def solve_no_split(time_limit_seconds):
 
     if SPLIT_CIRCUITS or not UNLIMITED_TIME:
         solver.parameters.max_time_in_seconds = time_limit_seconds
-    
-    solution_printer = SolutionProgressCallback(total_overload, total_distance)
+
+    callback_vars = {
+        'total_overload': total_overload,
+        'total_distance': total_distance,
+        'primary': primary,
+        'secondary': secondary,
+    }
+    solution_printer = SolutionProgressCallback(callback_vars)
     
     print("\nSolver running. Enter \"stop\" to halt.", flush=True)
     listener_thread = threading.Thread(target=stop_listener, args=(solver,), daemon=True)
@@ -409,7 +451,16 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
             model.AddHint(u_prim[r, p_prim, c_prim], 1)
             model.AddHint(u_sec[r, p_sec, c_sec], 1)
 
-    solution_printer = SolutionProgressCallback(total_overload, total_distance, num_splits)
+    callback_vars = {
+        'total_overload': total_overload,
+        'total_distance': total_distance,
+        'num_splits': num_splits,
+        'is_unsplit': is_unsplit, 'u_prim': u_prim, 'u_sec': u_sec,
+        'is_prim_split': is_prim_split, 'ps_p1': ps_p1, 'ps_p2': ps_p2, 'ps_s': ps_s,
+        'is_sec_split': is_sec_split, 'ss_p': ss_p, 'ss_s1': ss_s1, 'ss_s2': ss_s2,
+        'split_point': split_point
+    }
+    solution_printer = SolutionProgressCallback(callback_vars)
 
     print("\nSolver running. Enter \"stop\" to halt.", flush=True)
     listener_thread = threading.Thread(target=stop_listener, args=(solver,), daemon=True)
@@ -419,7 +470,7 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
 
     solution = []
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        print(f"\nPhase 2: SUCCESS. CP-SAT found a solution with status: {solver.StatusName(status)}")
+        print(f"\nSolver finished with status: {solver.StatusName(status)}")
         for r in RACK_IDS:
             row_sol = {'rack': r}
             if solver.BooleanValue(is_unsplit[r]):
@@ -441,7 +492,7 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
             solution.append(row_sol)
         return solution
     else:
-        print(f"\nPhase 2: FAILED. CP-SAT could not find a solution. Status: {solver.StatusName(status)}")
+        print(f"\nSolver finished with status: {solver.StatusName(status)}")
         return hint_solution
 
 def get_solution_quality(solution, verbose=False, title="Overload Analysis"):
@@ -548,9 +599,14 @@ def print_pdu_summary(solution):
         for slot in range(1, NUM_CIRCUITS_PER_PDU + 1):
             print(f"  Circuit {slot}: {pdu_map[pdu][slot]}")
 
-def generate_excel_output(solution):
+def generate_excel_output(solution, is_intermediate=False):
     """Generates an Excel file with the final circuit assignments."""
-    print("\n--- Generating Excel Output ---")
+    if is_intermediate:
+        # For intermediate saves, don't print to console
+        pass
+    else:
+        print("\n--- Generating Final Excel Output ---")
+    
     output_data = []
 
     # Define headers based on split mode
@@ -559,48 +615,41 @@ def generate_excel_output(solution):
     else:
         headers = ["ROW", "PRI PDU", "PRI CKT", "SEC PDU", "SEC CKT"]
 
-    # Populate data rows
-    for row_info in sorted(solution, key=lambda x: x['rack']):
-        r = row_info['rack']
-        
+    # This logic handles the raw solution dict from the solver
+    rack_map = {row['rack']: row for row in solution}
+    for r in RACK_IDS:
+        row_info = rack_map[r]
         if SPLIT_CIRCUITS:
             if 'prim_1' in row_info:  # Primary split
                 sp, p1, p2, s = row_info['split_at'], row_info['prim_1'], row_info['prim_2'], row_info['sec']
                 for i in range(RACKS_PER_ROW):
                     rack_unit = i + 1
-                    if i < sp:
-                        output_data.append([r, rack_unit, p1[0], p1[1], s[0], s[1]])
-                    else:
-                        output_data.append([r, rack_unit, p2[0], p2[1], s[0], s[1]])
-            elif 'sec_1' in row_info:  # Secondary split
+                    if i < sp: output_data.append([r, rack_unit, p1[0], p1[1], s[0], s[1]])
+                    else: output_data.append([r, rack_unit, p2[0], p2[1], s[0], s[1]])
+            elif 'sec_1' in row_info: # Secondary split
                 sp, p, s1, s2 = row_info['split_at'], row_info['prim'], row_info['sec_1'], row_info['sec_2']
                 for i in range(RACKS_PER_ROW):
                     rack_unit = i + 1
-                    if i < sp:
-                        output_data.append([r, rack_unit, p[0], p[1], s1[0], s1[1]])
-                    else:
-                        output_data.append([r, rack_unit, p[0], p[1], s2[0], s2[1]])
-            else:  # Unsplit
+                    if i < sp: output_data.append([r, rack_unit, p[0], p[1], s1[0], s1[1]])
+                    else: output_data.append([r, rack_unit, p[0], p[1], s2[0], s2[1]])
+            else:
                 p, s = row_info['prim'], row_info['sec']
                 for i in range(RACKS_PER_ROW):
                     rack_unit = i + 1
                     output_data.append([r, rack_unit, p[0], p[1], s[0], s[1]])
         else: # NO-SPLIT MODE
-            p, s = row_info['prim'], row_info['sec']
+            p, s = (row_info['prim_pdu'], row_info['prim_circuit']), (row_info['sec_pdu'], row_info['sec_circuit'])
             output_data.append([r, p[0], p[1], s[0], s[1]])
 
-    # Create a pandas DataFrame and save to Excel
     df = pd.DataFrame(output_data, columns=headers)
-    
-    # Generate a timestamped filename
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"striping_scheme_{timestamp}.xlsx"
+    filename = "striping_scheme.xlsx"
     
     try:
         df.to_excel(filename, index=False)
-        print(f"✅ Successfully created Excel file: {filename}")
+        if not is_intermediate:
+             print(f"✅ Successfully created final Excel file: {filename}")
     except Exception as e:
-        print(f"❌ Error creating Excel file: {e}")
+        print(f"❌ Error updating Excel file: {e}")
 
 if __name__ == "__main__":
     start_time = time.time()
@@ -624,6 +673,7 @@ if __name__ == "__main__":
         print(f"\n--- Running Phase 2: CP-SAT Solver with Splits ({'no time limit' if UNLIMITED_TIME else f'{repair_time:.0f}s'}) ---")
         final_solution = solve_with_cp_sat(repair_time, phase1_solution)
         
+        # The final, definitive solution is written to the Excel file once at the end.
         generate_excel_output(final_solution)
         if PRINT_PDU_SUMMARY:
             print_pdu_summary(final_solution)
@@ -636,16 +686,18 @@ if __name__ == "__main__":
         no_split_solution_raw, _ = solve_no_split(solve_time)
 
         if no_split_solution_raw:
-            no_split_solution = []
-            for row in no_split_solution_raw:
-                no_split_solution.append({
-                    'rack': row['rack'],
-                    'prim': (row['prim_pdu'], row['prim_circuit']),
-                    'sec': (row['sec_pdu'], row['sec_circuit'])
-                })
-            generate_excel_output(no_split_solution)
+            # The final, definitive solution is written to the Excel file once at the end.
+            generate_excel_output(no_split_solution_raw)
             if PRINT_PDU_SUMMARY:
-                print_pdu_summary(no_split_solution)
-            get_solution_quality(no_split_solution, title="Final Solution Analysis", verbose=True)
+                # Need to convert format for this function
+                pdu_summary_solution = []
+                for row in no_split_solution_raw:
+                    pdu_summary_solution.append({
+                        'rack': row['rack'],
+                        'prim': (row['prim_pdu'], row['prim_circuit']),
+                        'sec': (row['sec_pdu'], row['sec_circuit'])
+                    })
+                print_pdu_summary(pdu_summary_solution)
+            get_solution_quality(no_split_solution_raw, title="Final Solution Analysis", verbose=True)
             
     print(f"\nTotal execution time: {time.time() - start_time:.2f} seconds")

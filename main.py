@@ -30,7 +30,7 @@ UPS_CAPACITY = 2000
 # ==============================================================================
 # --- Main Operation Mode ---
 SPLIT_CIRCUITS = True # Enables splitting busway segments into at most 2 continuous circuits. Set to false to assign each busway run exactly 1 circuit.
-UNLIMITED_TIME = True # Lets solver run indefinitely until solver ends or user enters "stop" into search
+UNLIMITED_TIME = True # Lets solver run indefinitely until solver ends or user enters "stop" into terminal
 TOTAL_TIME_LIMIT_MINUTES = 30 # Total time for Phase 1 (no split solve) and Phase 2 (split solve) in split mode
 PHASE1_BASELINE_SECONDS = 10 # Time to find a starting point for Phase 2
 PHASE1_NO_SPLIT_SECONDS = 90 # Total time for the solver in no-split mode
@@ -40,7 +40,7 @@ NUM_SEARCH_WORKERS = 16
 # Any penalty can be set to 0 if minimizing that aspect is not needed.
 OVERLOAD_WEIGHT = 20000  # Penalty for each 1kW of overload
 SPLIT_PENALTY_WEIGHT = 100  # Penalty for each circuit that is split (not used if SPLIT_CIRCUITS is false))
-DISTANCE_PENALTY_WEIGHT = 1 # Penalty for each distance unit a circuit is away from its PDU
+DISTANCE_PENALTY_WEIGHT = 0.5 # Penalty for each distance unit a circuit is away from its PDU
 
 # --- Final Report Options ---
 PRINT_PDU_SUMMARY = True
@@ -101,10 +101,12 @@ RACK_LOADS_AGG = {r: sum(RACK_LOADS[r]) for r in RACK_IDS}
 
 def stop_listener(solver):
     """Waits for user input to stop the solver."""
-    command = input()
-    if command.lower() == 'stop':
-        print("\n...Stop command received. Halting solver gracefully...", flush=True)
-        solver.StopSearch()
+    while True:
+        command = input()
+        if command.lower() == 'stop':
+            print("\n...Stop command received. Halting solver gracefully...", flush=True)
+            solver.StopSearch()
+            break
 
 class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
     """Prints intermediate solutions and statistics."""
@@ -227,7 +229,8 @@ def solve_no_split(time_limit_seconds):
 
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = NUM_SEARCH_WORKERS
-    if not UNLIMITED_TIME:
+
+    if SPLIT_CIRCUITS or not UNLIMITED_TIME:
         solver.parameters.max_time_in_seconds = time_limit_seconds
     
     solution_printer = SolutionProgressCallback(total_overload, total_distance)
@@ -627,11 +630,11 @@ if __name__ == "__main__":
         get_solution_quality(final_solution, title="Final Solution Analysis", verbose=True)
 
     else: # NO-SPLIT MODE
-        time_limit = TOTAL_TIME_LIMIT_MINUTES * 60 if UNLIMITED_TIME else PHASE1_NO_SPLIT_SECONDS
-        time_limit_str = "no time limit" if UNLIMITED_TIME else f"{time_limit}s"
-        print(f"--- Running in NO-SPLIT mode ({time_limit_str}) ---")
+        print(f"--- Running in NO-SPLIT mode ({'no time limit' if UNLIMITED_TIME else f'{PHASE1_NO_SPLIT_SECONDS}s'}) ---")
         
-        no_split_solution_raw, _ = solve_no_split(time_limit)
+        solve_time = PHASE1_NO_SPLIT_SECONDS if not UNLIMITED_TIME else -1
+        no_split_solution_raw, _ = solve_no_split(solve_time)
+
         if no_split_solution_raw:
             no_split_solution = []
             for row in no_split_solution_raw:

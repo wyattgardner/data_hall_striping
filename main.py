@@ -9,6 +9,7 @@ import string
 from ortools.sat.python import cp_model
 import pandas as pd
 from datetime import datetime
+import threading
 
 # ==============================================================================
 #                                I. SYSTEM CONFIGURATION
@@ -29,6 +30,7 @@ UPS_CAPACITY = 2000
 # ==============================================================================
 # --- Main Operation Mode ---
 SPLIT_CIRCUITS = True # Enables splitting busway segments into at most 2 continuous circuits. Set to false to assign each busway run exactly 1 circuit.
+UNLIMITED_TIME = True # Lets solver run indefinitely until solver ends or user enters "stop" into search
 TOTAL_TIME_LIMIT_MINUTES = 30 # Total time for Phase 1 (no split solve) and Phase 2 (split solve) in split mode
 PHASE1_BASELINE_SECONDS = 10 # Time to find a starting point for Phase 2
 PHASE1_NO_SPLIT_SECONDS = 90 # Total time for the solver in no-split mode
@@ -36,8 +38,8 @@ NUM_SEARCH_WORKERS = 16
 
 # --- Objective Weights for Scoring ---
 # Any penalty can be set to 0 if minimizing that aspect is not needed.
-OVERLOAD_WEIGHT = 10000  # Penalty for each 1kW of overload
-SPLIT_PENALTY_WEIGHT = 50  # Penalty for each circuit that is split (not used if SPLIT_CIRCUITS is false))
+OVERLOAD_WEIGHT = 20000  # Penalty for each 1kW of overload
+SPLIT_PENALTY_WEIGHT = 100  # Penalty for each circuit that is split (not used if SPLIT_CIRCUITS is false))
 DISTANCE_PENALTY_WEIGHT = 1 # Penalty for each distance unit a circuit is away from its PDU
 
 # --- Final Report Options ---
@@ -97,6 +99,13 @@ RACK_LOADS_AGG = {r: sum(RACK_LOADS[r]) for r in RACK_IDS}
 #                              CORE LOGIC AND SOLVERS
 # ==============================================================================
 
+def stop_listener(solver):
+    """Waits for user input to stop the solver."""
+    command = input()
+    if command.lower() == 'stop':
+        print("\n...Stop command received. Halting solver gracefully...", flush=True)
+        solver.StopSearch()
+
 class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
     """Prints intermediate solutions and statistics."""
 
@@ -118,9 +127,11 @@ class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
             dist = self.Value(self._total_distance)
             dist_penalty = dist * DISTANCE_PENALTY_WEIGHT
             
-            print(f"  > Progress ({current_time - self._start_time:.1f}s):")
-            print(f"    - Overload: {ol_penalty:>10,} penalty ({ol:,} kW)")
-            print(f"    - Distance: {dist_penalty:>10,} penalty ({dist:,} units)")
+            # Use carriage return to keep output on the same block of lines
+            # and flush to ensure it prints immediately.
+            print(f"  > Progress ({current_time - self._start_time:.1f}s):", flush=True)
+            print(f"    - Overload: {ol_penalty:>10,} penalty ({ol:,} kW)      ", flush=True)
+            print(f"    - Distance: {dist_penalty:>10,} penalty ({dist:,} units)      ", flush=True)
 
             if self._num_splits is not None:
                 splits = self.Value(self._num_splits)
@@ -215,9 +226,16 @@ def solve_no_split(time_limit_seconds):
     model.Minimize(total_overload * OVERLOAD_WEIGHT + total_distance * DISTANCE_PENALTY_WEIGHT)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds, solver.parameters.num_search_workers = time_limit_seconds, NUM_SEARCH_WORKERS
+    solver.parameters.num_search_workers = NUM_SEARCH_WORKERS
+    if not UNLIMITED_TIME:
+        solver.parameters.max_time_in_seconds = time_limit_seconds
     
     solution_printer = SolutionProgressCallback(total_overload, total_distance)
+    
+    print("\nSolver running. Enter \"stop\" to halt.", flush=True)
+    listener_thread = threading.Thread(target=stop_listener, args=(solver,), daemon=True)
+    listener_thread.start()
+    
     status, results = solver.Solve(model, solution_printer), []
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -375,8 +393,9 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
 
     # --- V. SOLVE AND RETURN ---
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit_seconds
     solver.parameters.num_search_workers = NUM_SEARCH_WORKERS
+    if not UNLIMITED_TIME:
+        solver.parameters.max_time_in_seconds = time_limit_seconds
     
     if hint_solution:
         for r_info in hint_solution:
@@ -388,6 +407,11 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
             model.AddHint(u_sec[r, p_sec, c_sec], 1)
 
     solution_printer = SolutionProgressCallback(total_overload, total_distance, num_splits)
+
+    print("\nSolver running. Enter \"stop\" to halt.", flush=True)
+    listener_thread = threading.Thread(target=stop_listener, args=(solver,), daemon=True)
+    listener_thread.start()
+    
     status = solver.Solve(model, solution_printer)
 
     solution = []
@@ -594,7 +618,7 @@ if __name__ == "__main__":
             })
         
         repair_time = TOTAL_TIME_LIMIT_MINUTES * 60 - (time.time() - start_time)
-        print(f"\n--- Running Phase 2: CP-SAT Solver with Splits ({repair_time:.0f}s) ---")
+        print(f"\n--- Running Phase 2: CP-SAT Solver with Splits ({'no time limit' if UNLIMITED_TIME else f'{repair_time:.0f}s'}) ---")
         final_solution = solve_with_cp_sat(repair_time, phase1_solution)
         
         generate_excel_output(final_solution)
@@ -603,8 +627,10 @@ if __name__ == "__main__":
         get_solution_quality(final_solution, title="Final Solution Analysis", verbose=True)
 
     else: # NO-SPLIT MODE
-        time_limit = PHASE1_NO_SPLIT_SECONDS
-        print(f"--- Running in NO-SPLIT mode for {time_limit}s ---")
+        time_limit = TOTAL_TIME_LIMIT_MINUTES * 60 if UNLIMITED_TIME else PHASE1_NO_SPLIT_SECONDS
+        time_limit_str = "no time limit" if UNLIMITED_TIME else f"{time_limit}s"
+        print(f"--- Running in NO-SPLIT mode ({time_limit_str}) ---")
+        
         no_split_solution_raw, _ = solve_no_split(time_limit)
         if no_split_solution_raw:
             no_split_solution = []

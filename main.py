@@ -7,29 +7,20 @@ import time
 from collections import defaultdict
 import string
 from ortools.sat.python import cp_model
-import pandas as pd
-from datetime import datetime
 import threading
+import shutil
+import openpyxl
+import sys
 
 # ==============================================================================
-#                                I. SYSTEM CONFIGURATION
+#                                 I. SOLVER SETTINGS
 # ==============================================================================
-# - Describe the physical layout of the system.
-# - LINEUPS and PDUS will be auto-generated from these values.
-NUM_LINEUPS = 4
-PDUS_PER_LINEUP = 3
-NUM_CIRCUITS_PER_PDU = 6
-NUM_ROWS = 32
-RACKS_PER_ROW = 18
-# kW ratings
-PDU_CAPACITY = 1000
-UPS_CAPACITY = 2000
+# --- File Configuration ---
+INPUT_FILENAME = "data_hall_striping.xlsm"
+OUTPUT_FILENAME = "data_hall_striping_OUTPUT.xlsm"
+DATA_SHEET_NAME = "Setup & Data"
 
-# ==============================================================================
-#                                II. SOLVER SETTINGS
-# ==============================================================================
-# --- Main Operation Mode ---
-SPLIT_CIRCUITS = True # Enables splitting busway segments into at most 2 continuous circuits. Set to false to assign each busway run exactly 1 circuit.
+# --- Solver Behavior ---
 UNLIMITED_TIME = True # Lets solver run indefinitely until solver ends or user enters "stop" into terminal
 TOTAL_TIME_LIMIT_MINUTES = 30 # Total time for Phase 1 (no split solve) and Phase 2 (split solve) in split mode
 PHASE1_BASELINE_SECONDS = 10 # Time to find a starting point for Phase 2
@@ -46,30 +37,52 @@ DISTANCE_PENALTY_WEIGHT = 0.5 # Penalty for each distance unit a circuit is away
 PRINT_PDU_SUMMARY = True
 
 # ==============================================================================
-#                                III. INPUT DATA
+#                                 II. EXCEL INPUT
 # ==============================================================================
-# Individual rack loads for each row. Rows start at the top left and go left to right, top to bottom. Individual racks go top to bottom.
-# If circuit splitting functionality isn't needed, the total row loads can be put instead.
-RACK_LOADS = {
-    1: [8,8,20,20,12,12,12,12,12,12,12,12,12,12,12,0,0,0], 2: [0,4,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0],
-    3: [8,8,20,12,12,12,12,12,0,12,12,12,12,12,12,12,12,0], 4: [12,4,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0],
-    5: [12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0], 6: [12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0],
-    7: [12,12,12,12,12,12,12,12,0,12,12,12,12,12,12,12,12,0], 8: [12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0],
-    9: [12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0], 10:[12,12,12,12,12,12,12,12,0,12,12,12,12,12,12,12,12,0],
-    11:[12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0], 12:[12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0],
-    13:[12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0], 14:[12,12,12,12,12,12,12,12,0,12,12,12,12,12,12,12,12,0],
-    15:[12,4,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0], 16:[0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0],
-    17:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0], 18:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,4,12],
-    19:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,0,12,12,12], 20:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12],
-    21:[0,0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12], 22:[0,0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12],
-    23:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,0,12,12,12], 24:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,8,12],
-    25:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12], 26:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,0,12,12,12],
-    27:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12], 28:[0,0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12],
-    29:[0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,4,12], 30:[0,12,12,12,12,12,12,12,12,12,12,12,12,12,0,20,8,8],
-    31:[0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,4,0], 32:[0,0,0,12,12,12,12,12,12,12,12,12,12,12,20,20,8,8],
-}
+try:
+    wb = openpyxl.load_workbook(INPUT_FILENAME, data_only=True)
+    ws = wb[DATA_SHEET_NAME]
+    
+    # Main Operation Mode (from Excel)
+    SPLIT_CIRCUITS = ws['D3'].value
+    NUM_ROWS = ws['D4'].value
+    RACKS_PER_ROW = ws['D6'].value
+    NUM_LINEUPS = ws['D7'].value
+    PDUS_PER_LINEUP = ws['D8'].value
+    NUM_CIRCUITS_PER_PDU = ws['D9'].value
+    PDU_CAPACITY = ws['D10'].value
+    UPS_CAPACITY = ws['D11'].value
+
+except FileNotFoundError:
+    print(f"FATAL ERROR: Input file not found at '{INPUT_FILENAME}'. Please ensure it is in the same directory.")
+    sys.exit(1)
+except KeyError:
+    print(f"FATAL ERROR: Worksheet '{DATA_SHEET_NAME}' not found in '{INPUT_FILENAME}'.")
+    sys.exit(1)
+except Exception as e:
+    print(f"FATAL ERROR: Could not read setup data from Excel. Check cell formatting. Error: {e}")
+    sys.exit(1)
+
+RACK_LOADS = {}
+if SPLIT_CIRCUITS:
+    loads_flat = []
+    # Read all rack unit loads from column Z (26) starting at Z5
+    for row in ws.iter_rows(min_row=5, min_col=26, max_col=26, max_row=5 + (NUM_ROWS * RACKS_PER_ROW) - 1):
+        loads_flat.append(row[0].value or 0)
+    
+    # Group the flat list of loads by row
+    load_index = 0
+    for r in range(1, NUM_ROWS + 1):
+        RACK_LOADS[r] = loads_flat[load_index : load_index + RACKS_PER_ROW]
+        load_index += RACKS_PER_ROW
+else:
+    # Read aggregated row loads from column R (18) starting at R5
+    row_num = 1
+    for row in ws.iter_rows(min_row=5, min_col=18, max_col=18, max_row=5 + NUM_ROWS - 1):
+        RACK_LOADS[row_num] = row[0].value or 0
+        row_num += 1
+
 # Represents horizontal distance from each PDU to each rack. Rack order is the same as for RACK_LOADS.
-# Example: Two rows directly plan south of a PDU would have a distance of 0. The two rows to the right both have a distance of 1.
 PDU_DISTANCES = {
     "A-1":[0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7],
     "A-2":[4,4,3,3,2,2,1,1,0,0,1,1,2,2,3,3,4,4,3,3,2,2,1,1,0,0,1,1,2,2,3,3],
@@ -86,17 +99,21 @@ PDU_DISTANCES = {
 }
 
 # ==============================================================================
-#                             IV. AUTO-GENERATED SYSTEM VARIABLES
+#                      III. AUTO-GENERATED SYSTEM VARIABLES
 # ==============================================================================
 # - These variables are derived from the settings above. Do not edit.
 LINEUPS = list(string.ascii_uppercase[:NUM_LINEUPS])
 PDUS = [f"{lineup}-{i+1}" for lineup in LINEUPS for i in range(PDUS_PER_LINEUP)]
 RACK_IDS = list(range(1, NUM_ROWS + 1))
 ALL_CIRCUITS = [(p, c) for p in PDUS for c in range(1, NUM_CIRCUITS_PER_PDU + 1)]
-RACK_LOADS_AGG = {r: sum(RACK_LOADS[r]) for r in RACK_IDS}
+
+if SPLIT_CIRCUITS:
+    RACK_LOADS_AGG = {r: sum(RACK_LOADS[r]) for r in RACK_IDS}
+else:
+    RACK_LOADS_AGG = RACK_LOADS
 
 # ==============================================================================
-#                              CORE LOGIC AND SOLVERS
+#                           CORE LOGIC AND SOLVERS
 # ==============================================================================
 
 def stop_listener(solver):
@@ -109,7 +126,7 @@ def stop_listener(solver):
             break
 
 class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
-    """Prints intermediate solutions, statistics, and exports to Excel."""
+    """Prints intermediate solutions and statistics."""
 
     def __init__(self, variables):
         cp_model.CpSolverSolutionCallback.__init__(self)
@@ -136,12 +153,10 @@ class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
                 splits = self.Value(self._vars['num_splits'])
                 split_penalty = splits * SPLIT_PENALTY_WEIGHT
                 print(f"    - Splits:   {split_penalty:>10,} penalty ({splits:,} splits)      ", flush=True)
-            
-            # --- Reconstruct solution and export to Excel ---
-            solution = []
-            # Check for a variable that ONLY exists in the split-mode solver
+
+            # --- Reconstruct, normalize, and export solution to Excel ---
+            raw_solution = []
             if 'is_unsplit' in self._vars:
-                # Full reconstruction for split mode (Phase 2)
                 for r in RACK_IDS:
                     row_sol = {'rack': r}
                     if self.Value(self._vars['is_unsplit'][r]):
@@ -160,21 +175,17 @@ class SolutionProgressCallback(cp_model.CpSolverSolutionCallback):
                             if self.Value(self._vars['ss_p'][(r,p,c)]): row_sol['prim'] = (p,c)
                             if self.Value(self._vars['ss_s1'][(r,p,c)]): row_sol['sec_1'] = (p,c)
                             if self.Value(self._vars['ss_s2'][(r,p,c)]): row_sol['sec_2'] = (p,c)
-                    solution.append(row_sol)
+                    raw_solution.append(row_sol)
             else:
-                # Simpler reconstruction for no-split mode (Phase 1 or no-split run)
                 for r in RACK_IDS:
                     prim_pdu, prim_c, sec_pdu, sec_c = (None, None, None, None)
                     for p, c in ALL_CIRCUITS:
                         if self.Value(self._vars['primary'][(r,p,c)]): prim_pdu, prim_c = p, c
                         if self.Value(self._vars['secondary'][(r,p,c)]): sec_pdu, sec_c = p, c
-                    solution.append({
-                        'rack': r, 'prim': (prim_pdu, prim_c), 'sec': (sec_pdu, sec_c),
-                        'prim_pdu': prim_pdu, 'prim_circuit': prim_c, 
-                        'sec_pdu': sec_pdu, 'sec_circuit': sec_c
-                    })
+                    raw_solution.append({'rack': r, 'prim_pdu': prim_pdu, 'prim_circuit': prim_c, 'sec_pdu': sec_pdu, 'sec_circuit': sec_c})
             
-            generate_excel_output(solution, is_intermediate=True)
+            normalized_solution = normalize_solution(raw_solution)
+            generate_excel_output(normalized_solution, is_intermediate=True)
 
 def solve_no_split(time_limit_seconds):
     """Phase 1: Finds the best possible solution without using splits."""
@@ -323,10 +334,10 @@ def solve_with_cp_sat(time_limit_seconds, hint_solution=None):
             model.Add(sum(circs) == 1).OnlyEnforceIf(is_active_r[i])
             model.Add(sum(circs) == 0).OnlyEnforceIf(is_active_r[i].Not())
         for p, c in ALL_CIRCUITS:
-             model.Add(ps_p1[r,p,c] + ps_p2[r,p,c] <= 1)
-             model.Add(ss_s1[r,p,c] + ss_s2[r,p,c] <= 1)
-             for var_group in circuit_vars_r:
-                all_uses_of_circuit[(p, c)].append(var_group[r,p,c])
+              model.Add(ps_p1[r,p,c] + ps_p2[r,p,c] <= 1)
+              model.Add(ss_s1[r,p,c] + ss_s2[r,p,c] <= 1)
+              for var_group in circuit_vars_r:
+                  all_uses_of_circuit[(p, c)].append(var_group[r,p,c])
 
     for p, c in ALL_CIRCUITS:
         model.Add(sum(all_uses_of_circuit[p, c]) <= 1)
@@ -548,17 +559,17 @@ def get_solution_quality(solution, verbose=False, title="Overload Analysis"):
             if load > UPS_CAPACITY: total_ups_overload += load - UPS_CAPACITY
 
         if verbose:
-            print("  PDU Status:")
+            print("  PDU Status:")
             for pdu in sorted(pdu_loads.keys()):
                 load = pdu_loads[pdu]
                 if load > PDU_CAPACITY:
-                    print(f"    - ❌ {pdu}: Load {load} kW > {PDU_CAPACITY} kW (Overload: {load - PDU_CAPACITY} kW)"); scenario_has_overload = True
-            print("  UPS Status:")
+                    print(f"    - ❌ {pdu}: Load {load} kW > {PDU_CAPACITY} kW (Overload: {load - PDU_CAPACITY} kW)"); scenario_has_overload = True
+            print("  UPS Status:")
             for ups in sorted(ups_loads.keys()):
                 load = ups_loads[ups]
                 if load > UPS_CAPACITY:
-                    print(f"    - ❌ UPS {ups}: Load {load} kW > {UPS_CAPACITY} kW (Overload: {load - UPS_CAPACITY} kW)"); scenario_has_overload = True
-            if not scenario_has_overload: print("    ✅ No PDU or UPS overloads in this scenario.")
+                    print(f"    - ❌ UPS {ups}: Load {load} kW > {UPS_CAPACITY} kW (Overload: {load - UPS_CAPACITY} kW)"); scenario_has_overload = True
+            if not scenario_has_overload: print("    ✅ No PDU or UPS overloads in this scenario.")
 
     total_overload = total_pdu_overload + total_ups_overload
     score = (total_overload * OVERLOAD_WEIGHT) + \
@@ -570,134 +581,168 @@ def get_solution_quality(solution, verbose=False, title="Overload Analysis"):
         print(f"Overload Penalty: {total_overload * OVERLOAD_WEIGHT:>10,} ({total_overload:,} kW)")
         print(f"Distance Penalty: {total_distance * DISTANCE_PENALTY_WEIGHT:>10,} ({total_distance:,} units)")
         if SPLIT_CIRCUITS:
-            print(f"   Split Penalty: {num_splits * SPLIT_PENALTY_WEIGHT:>10,} ({num_splits:,} splits)")
+            print(f"  Split Penalty: {num_splits * SPLIT_PENALTY_WEIGHT:>10,} ({num_splits:,} splits)")
         print("---------------------------------")
-        print(f"   TOTAL SCORE:    {score:>10,}")
+        print(f"  TOTAL SCORE:    {score:>10,}")
 
 
     return total_overload, score, []
 
-def print_pdu_summary(solution):
-    print("\n--- PDU Circuit Summary ---")
-    pdu_map = {pdu: {slot: "empty" for slot in range(1, NUM_CIRCUITS_PER_PDU + 1)} for pdu in PDUS}
-    for row in solution:
-        r = row['rack']
-        if 'prim_1' in row:
-            pdu_map[row['prim_1'][0]][row['prim_1'][1]] = f"Rack {r} (Seg 1, Primary)"
-            pdu_map[row['prim_2'][0]][row['prim_2'][1]] = f"Rack {r} (Seg 2, Primary)"
-        if 'prim' in row:
-             pdu_map[row['prim'][0]][row['prim'][1]] = f"Rack {r} (Primary)"
+def normalize_solution(raw_solution):
+    """Takes the solver's raw output and returns a list of normalized assignments."""
+    assignments = []
+    rack_map = {row['rack']: row for row in raw_solution}
+    for r in RACK_IDS:
+        row_info = rack_map.get(r)
+        if not row_info: continue
+
+        if 'prim_1' in row_info or 'sec_1' in row_info or (SPLIT_CIRCUITS and 'prim' in row_info):
+            for i in range(RACKS_PER_ROW):
+                unit_id = i + 1
+                entry = {'row': r, 'unit': unit_id}
+                if 'prim_1' in row_info:
+                    sp, p1, p2, s = row_info['split_at'], row_info['prim_1'], row_info['prim_2'], row_info['sec']
+                    prim = p1 if i < sp else p2
+                    entry.update({'prim_pdu': prim[0], 'prim_ckt_physical': prim[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+                elif 'sec_1' in row_info:
+                    sp, p, s1, s2 = row_info['split_at'], row_info['prim'], row_info['sec_1'], row_info['sec_2']
+                    sec = s1 if i < sp else s2
+                    entry.update({'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': sec[0], 'sec_ckt_physical': sec[1]})
+                else: # Unsplit row from a split-capable solver
+                    if 'prim' in row_info:
+                        p, s = row_info['prim'], row_info['sec']
+                    else: # Handles data from solve_no_split during Phase 1
+                        p = (row_info['prim_pdu'], row_info['prim_circuit'])
+                        s = (row_info['sec_pdu'], row_info['sec_circuit'])
+                    entry.update({'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+                assignments.append(entry)
+        else: # No-split mode (from solve_no_split)
+            p = (row_info['prim_pdu'], row_info['prim_circuit'])
+            s = (row_info['sec_pdu'], row_info['sec_circuit'])
+            assignments.append({'row': r, 'unit': 0, 'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+
+    # Build map to normalize circuits
+    pdu_targets = defaultdict(list)
+    for asn in assignments:
+        pdu_targets[asn['prim_pdu']].append((asn['row'], asn['unit']))
+        pdu_targets[asn['sec_pdu']].append((asn['row'], asn['unit']))
+    
+    circuit_remap = {}
+    for pdu, targets in pdu_targets.items():
+        sorted_unique_targets = sorted(list(set(targets)))
+        circuit_remap[pdu] = {target: i + 1 for i, target in enumerate(sorted_unique_targets)}
+
+    # Apply the normalization map
+    for asn in assignments:
+        prim_target = (asn['row'], asn['unit'])
+        sec_target = (asn['row'], asn['unit'])
+        asn['prim_ckt_norm'] = circuit_remap[asn['prim_pdu']][prim_target]
+        asn['sec_ckt_norm'] = circuit_remap[asn['sec_pdu']][sec_target]
         
-        if 'sec_1' in row:
-            pdu_map[row['sec_1'][0]][row['sec_1'][1]] = f"Rack {r} (Seg 1, Secondary)"
-            pdu_map[row['sec_2'][0]][row['sec_2'][1]] = f"Rack {r} (Seg 2, Secondary)"
-        if 'sec' in row:
-            pdu_map[row['sec'][0]][row['sec'][1]] = f"Rack {r} (Secondary)"
+    return assignments
+
+def print_pdu_summary(normalized_solution):
+    """Prints a summary of the final circuit assignments using normalized numbers."""
+    print("\n--- PDU Circuit Summary (Normalized) ---")
+    pdu_map = {pdu: {slot: "empty" for slot in range(1, NUM_CIRCUITS_PER_PDU + 1)} for pdu in PDUS}
+    
+    for asn in normalized_solution:
+        r, u = asn['row'], asn['unit']
+        
+        # Determine the correct label based on split mode
+        if SPLIT_CIRCUITS:
+            label = f"Row {r}, Unit {u}"
+        else:
+            label = f"Row {r}"
+
+        # Populate primary
+        prim_pdu = asn['prim_pdu']
+        prim_ckt = asn['prim_ckt_norm']
+        if pdu_map[prim_pdu][prim_ckt] == "empty":
+             pdu_map[prim_pdu][prim_ckt] = f"{label} (Primary)"
+        
+        # Populate secondary
+        sec_pdu = asn['sec_pdu']
+        sec_ckt = asn['sec_ckt_norm']
+        if pdu_map[sec_pdu][sec_ckt] == "empty":
+             pdu_map[sec_pdu][sec_ckt] = f"{label} (Secondary)"
 
     for pdu in PDUS:
         print(f"\n--- PDU: {pdu} ---")
         for slot in range(1, NUM_CIRCUITS_PER_PDU + 1):
-            print(f"  Circuit {slot}: {pdu_map[pdu][slot]}")
+            print(f"  Circuit {slot}: {pdu_map[pdu][slot]}")
 
-def generate_excel_output(solution, is_intermediate=False):
-    """Generates an Excel file with the final circuit assignments."""
-    if is_intermediate:
-        # For intermediate saves, don't print to console
-        pass
-    else:
-        print("\n--- Generating Final Excel Output ---")
-    
-    output_data = []
+def generate_excel_output(normalized_solution, is_intermediate=False):
+    """Generates the output Excel file from normalized solution data."""
+    if not normalized_solution:
+        if not is_intermediate:
+            print("WARNING: No solution provided to generate Excel output.")
+        return
 
-    # Define headers based on split mode
-    if SPLIT_CIRCUITS:
-        headers = ["ROW", "RACK", "PRI PDU", "PRI CKT", "SEC PDU", "SEC CKT"]
-    else:
-        headers = ["ROW", "PRI PDU", "PRI CKT", "SEC PDU", "SEC CKT"]
-
-    # This logic handles the raw solution dict from the solver
-    rack_map = {row['rack']: row for row in solution}
-    for r in RACK_IDS:
-        row_info = rack_map[r]
-        if SPLIT_CIRCUITS:
-            if 'prim_1' in row_info:  # Primary split
-                sp, p1, p2, s = row_info['split_at'], row_info['prim_1'], row_info['prim_2'], row_info['sec']
-                for i in range(RACKS_PER_ROW):
-                    rack_unit = i + 1
-                    if i < sp: output_data.append([r, rack_unit, p1[0], p1[1], s[0], s[1]])
-                    else: output_data.append([r, rack_unit, p2[0], p2[1], s[0], s[1]])
-            elif 'sec_1' in row_info: # Secondary split
-                sp, p, s1, s2 = row_info['split_at'], row_info['prim'], row_info['sec_1'], row_info['sec_2']
-                for i in range(RACKS_PER_ROW):
-                    rack_unit = i + 1
-                    if i < sp: output_data.append([r, rack_unit, p[0], p[1], s1[0], s1[1]])
-                    else: output_data.append([r, rack_unit, p[0], p[1], s2[0], s2[1]])
-            else:
-                p, s = row_info['prim'], row_info['sec']
-                for i in range(RACKS_PER_ROW):
-                    rack_unit = i + 1
-                    output_data.append([r, rack_unit, p[0], p[1], s[0], s[1]])
-        else: # NO-SPLIT MODE
-            p, s = (row_info['prim_pdu'], row_info['prim_circuit']), (row_info['sec_pdu'], row_info['sec_circuit'])
-            output_data.append([r, p[0], p[1], s[0], s[1]])
-
-    df = pd.DataFrame(output_data, columns=headers)
-    filename = "striping_scheme.xlsx"
+    if not is_intermediate:
+        print(f"\n--- Generating Final Excel Output: {OUTPUT_FILENAME} ---")
     
     try:
-        df.to_excel(filename, index=False)
-        if not is_intermediate:
-             print(f"✅ Successfully created final Excel file: {filename}")
+        shutil.copy(INPUT_FILENAME, OUTPUT_FILENAME)
+        wb = openpyxl.load_workbook(OUTPUT_FILENAME, keep_vba=True)
+        ws = wb[DATA_SHEET_NAME]
     except Exception as e:
-        print(f"❌ Error updating Excel file: {e}")
+        if not is_intermediate:
+            print(f"❌ Error preparing output Excel file: {e}")
+        return
+
+    # Write normalized data to Excel
+    start_row = 5
+    start_col = 27 if SPLIT_CIRCUITS else 19 # AA or S
+
+    for i, asn in enumerate(normalized_solution):
+        output_row_data = [asn['prim_pdu'], asn['prim_ckt_norm'], asn['sec_pdu'], asn['sec_ckt_norm']]
+        for j, value in enumerate(output_row_data):
+            ws.cell(row=start_row + i, column=start_col + j, value=value)
+
+    try:
+        wb.save(OUTPUT_FILENAME)
+        if not is_intermediate:
+            print(f"✅ Successfully created final Excel file: {OUTPUT_FILENAME}")
+    except Exception as e:
+        if not is_intermediate:
+            print(f"❌ Error saving output Excel file: {e}")
 
 if __name__ == "__main__":
     start_time = time.time()
+    
     if SPLIT_CIRCUITS:
         print(f"--- Running Phase 1: Generating baseline solution ({PHASE1_BASELINE_SECONDS}s) ---")
         phase1_cp_solution, _ = solve_no_split(PHASE1_BASELINE_SECONDS)
         
         if not phase1_cp_solution:
             print("CRITICAL: CP-SAT Phase 1 failed to find a valid starting solution. Exiting.")
-            exit()
+            sys.exit(1)
         
-        phase1_solution = []
-        for row in phase1_cp_solution:
-            phase1_solution.append({
-                'rack': row['rack'],
-                'prim': (row['prim_pdu'], row['prim_circuit']),
-                'sec': (row['sec_pdu'], row['sec_circuit'])
-            })
+        phase1_solution = [{'rack': row['rack'], 'prim': (row['prim_pdu'], row['prim_circuit']), 'sec': (row['sec_pdu'], row['sec_circuit'])} for row in phase1_cp_solution]
         
         repair_time = TOTAL_TIME_LIMIT_MINUTES * 60 - (time.time() - start_time)
         print(f"\n--- Running Phase 2: CP-SAT Solver with Splits ({'no time limit' if UNLIMITED_TIME else f'{repair_time:.0f}s'}) ---")
-        final_solution = solve_with_cp_sat(repair_time, phase1_solution)
+        final_raw_solution = solve_with_cp_sat(repair_time, phase1_solution)
         
-        # The final, definitive solution is written to the Excel file once at the end.
-        generate_excel_output(final_solution)
-        if PRINT_PDU_SUMMARY:
-            print_pdu_summary(final_solution)
-        get_solution_quality(final_solution, title="Final Solution Analysis", verbose=True)
+        if final_raw_solution:
+            final_normalized_solution = normalize_solution(final_raw_solution)
+            generate_excel_output(final_normalized_solution)
+            if PRINT_PDU_SUMMARY:
+                print_pdu_summary(final_normalized_solution)
+            get_solution_quality(final_raw_solution, title="Final Solution Analysis", verbose=True)
 
     else: # NO-SPLIT MODE
         print(f"--- Running in NO-SPLIT mode ({'no time limit' if UNLIMITED_TIME else f'{PHASE1_NO_SPLIT_SECONDS}s'}) ---")
         
         solve_time = PHASE1_NO_SPLIT_SECONDS if not UNLIMITED_TIME else -1
-        no_split_solution_raw, _ = solve_no_split(solve_time)
+        final_raw_solution, _ = solve_no_split(solve_time)
 
-        if no_split_solution_raw:
-            # The final, definitive solution is written to the Excel file once at the end.
-            generate_excel_output(no_split_solution_raw)
+        if final_raw_solution:
+            final_normalized_solution = normalize_solution(final_raw_solution)
+            generate_excel_output(final_normalized_solution)
             if PRINT_PDU_SUMMARY:
-                # Need to convert format for this function
-                pdu_summary_solution = []
-                for row in no_split_solution_raw:
-                    pdu_summary_solution.append({
-                        'rack': row['rack'],
-                        'prim': (row['prim_pdu'], row['prim_circuit']),
-                        'sec': (row['sec_pdu'], row['sec_circuit'])
-                    })
-                print_pdu_summary(pdu_summary_solution)
-            get_solution_quality(no_split_solution_raw, title="Final Solution Analysis", verbose=True)
+                print_pdu_summary(final_normalized_solution)
+            get_solution_quality(final_raw_solution, title="Final Solution Analysis", verbose=True)
             
     print(f"\nTotal execution time: {time.time() - start_time:.2f} seconds")

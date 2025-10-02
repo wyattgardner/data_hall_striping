@@ -547,7 +547,11 @@ def get_solution_quality(solution, verbose=False, title="Overload Analysis"):
                 else:
                     pdu_loads[p[0]] += RACK_LOADS_AGG[r]
             else: # Not split
-                p, s = info['prim'], info['sec']
+                if 'prim' in info:
+                    p, s = info['prim'], info['sec']
+                else:
+                    p = (info['prim_pdu'], info['prim_circuit'])
+                    s = (info['sec_pdu'], info['sec_circuit'])
                 active_pdu = s[0] if p[0].startswith(f_lineup) else p[0]
                 pdu_loads[active_pdu] += RACK_LOADS_AGG[r]
 
@@ -590,13 +594,18 @@ def get_solution_quality(solution, verbose=False, title="Overload Analysis"):
 
 def normalize_solution(raw_solution):
     """Takes the solver's raw output and returns a list of normalized assignments."""
+    # 1. Create a detailed list of all assignments with their physical circuit numbers
     assignments = []
     rack_map = {row['rack']: row for row in raw_solution}
     for r in RACK_IDS:
         row_info = rack_map.get(r)
         if not row_info: continue
 
-        if 'prim_1' in row_info or 'sec_1' in row_info or (SPLIT_CIRCUITS and 'prim' in row_info):
+        # This logic handles all data formats (split, unsplit, phase 1, phase 2)
+        # and creates a consistent list of assignments to be normalized.
+        is_split_row = 'prim_1' in row_info or 'sec_1' in row_info
+        
+        if is_split_row:
             for i in range(RACKS_PER_ROW):
                 unit_id = i + 1
                 entry = {'row': r, 'unit': unit_id}
@@ -604,73 +613,67 @@ def normalize_solution(raw_solution):
                     sp, p1, p2, s = row_info['split_at'], row_info['prim_1'], row_info['prim_2'], row_info['sec']
                     prim = p1 if i < sp else p2
                     entry.update({'prim_pdu': prim[0], 'prim_ckt_physical': prim[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
-                elif 'sec_1' in row_info:
+                else: # 'sec_1' in row_info
                     sp, p, s1, s2 = row_info['split_at'], row_info['prim'], row_info['sec_1'], row_info['sec_2']
                     sec = s1 if i < sp else s2
                     entry.update({'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': sec[0], 'sec_ckt_physical': sec[1]})
-                else: # Unsplit row from a split-capable solver
-                    if 'prim' in row_info:
-                        p, s = row_info['prim'], row_info['sec']
-                    else: # Handles data from solve_no_split during Phase 1
-                        p = (row_info['prim_pdu'], row_info['prim_circuit'])
-                        s = (row_info['sec_pdu'], row_info['sec_circuit'])
-                    entry.update({'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
                 assignments.append(entry)
-        else: # No-split mode (from solve_no_split)
-            p = (row_info['prim_pdu'], row_info['prim_circuit'])
-            s = (row_info['sec_pdu'], row_info['sec_circuit'])
-            assignments.append({'row': r, 'unit': 0, 'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+        else: # Unsplit row from any solver phase
+            if 'prim' in row_info:
+                p, s = row_info['prim'], row_info['sec']
+            else: # Handles data from solve_no_split
+                p = (row_info['prim_pdu'], row_info['prim_circuit'])
+                s = (row_info['sec_pdu'], row_info['sec_circuit'])
 
-    # Build map to normalize circuits
-    pdu_targets = defaultdict(list)
+            if SPLIT_CIRCUITS: # If master mode is split, output should be per-unit
+                 for i in range(RACKS_PER_ROW):
+                    unit_id = i + 1
+                    assignments.append({'row': r, 'unit': unit_id, 'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+            else: # If master mode is no-split, output is per-row
+                 assignments.append({'row': r, 'unit': 0, 'prim_pdu': p[0], 'prim_ckt_physical': p[1], 'sec_pdu': s[0], 'sec_ckt_physical': s[1]})
+
+    # 2. Find which physical circuits are used by each PDU
+    pdu_circuits_used = defaultdict(set)
     for asn in assignments:
-        pdu_targets[asn['prim_pdu']].append((asn['row'], asn['unit']))
-        pdu_targets[asn['sec_pdu']].append((asn['row'], asn['unit']))
+        if asn['prim_pdu']: pdu_circuits_used[asn['prim_pdu']].add(asn['prim_ckt_physical'])
+        if asn['sec_pdu']: pdu_circuits_used[asn['sec_pdu']].add(asn['sec_ckt_physical'])
     
+    # 3. Create the remapping dictionary from physical to normalized circuits
     circuit_remap = {}
-    for pdu, targets in pdu_targets.items():
-        sorted_unique_targets = sorted(list(set(targets)))
-        circuit_remap[pdu] = {target: i + 1 for i, target in enumerate(sorted_unique_targets)}
+    for pdu, physical_circuits in pdu_circuits_used.items():
+        sorted_physical_circuits = sorted(list(physical_circuits))
+        circuit_remap[pdu] = {physical: i + 1 for i, physical in enumerate(sorted_physical_circuits)}
 
-    # Apply the normalization map
+    # 4. Apply the normalization map to the assignments list
     for asn in assignments:
-        prim_target = (asn['row'], asn['unit'])
-        sec_target = (asn['row'], asn['unit'])
-        asn['prim_ckt_norm'] = circuit_remap[asn['prim_pdu']][prim_target]
-        asn['sec_ckt_norm'] = circuit_remap[asn['sec_pdu']][sec_target]
+        if asn['prim_pdu']:
+            asn['prim_ckt_norm'] = circuit_remap[asn['prim_pdu']][asn['prim_ckt_physical']]
+        if asn['sec_pdu']:
+            asn['sec_ckt_norm'] = circuit_remap[asn['sec_pdu']][asn['sec_ckt_physical']]
         
     return assignments
 
 def print_pdu_summary(normalized_solution):
     """Prints a summary of the final circuit assignments using normalized numbers."""
     print("\n--- PDU Circuit Summary (Normalized) ---")
-    pdu_map = {pdu: {slot: "empty" for slot in range(1, NUM_CIRCUITS_PER_PDU + 1)} for pdu in PDUS}
+    pdu_map = defaultdict(lambda: defaultdict(list))
     
     for asn in normalized_solution:
         r, u = asn['row'], asn['unit']
-        
-        # Determine the correct label based on split mode
-        if SPLIT_CIRCUITS:
-            label = f"Row {r}, Unit {u}"
-        else:
-            label = f"Row {r}"
+        label = f"Row {r}, Unit {u}" if SPLIT_CIRCUITS else f"Row {r}"
 
-        # Populate primary
-        prim_pdu = asn['prim_pdu']
-        prim_ckt = asn['prim_ckt_norm']
-        if pdu_map[prim_pdu][prim_ckt] == "empty":
-             pdu_map[prim_pdu][prim_ckt] = f"{label} (Primary)"
-        
-        # Populate secondary
-        sec_pdu = asn['sec_pdu']
-        sec_ckt = asn['sec_ckt_norm']
-        if pdu_map[sec_pdu][sec_ckt] == "empty":
-             pdu_map[sec_pdu][sec_ckt] = f"{label} (Secondary)"
+        # Group all assignments for a given circuit
+        pdu_map[asn['prim_pdu']][asn['prim_ckt_norm']].append(f"{label} (Primary)")
+        pdu_map[asn['sec_pdu']][asn['sec_ckt_norm']].append(f"{label} (Secondary)")
 
     for pdu in PDUS:
         print(f"\n--- PDU: {pdu} ---")
         for slot in range(1, NUM_CIRCUITS_PER_PDU + 1):
-            print(f"  Circuit {slot}: {pdu_map[pdu][slot]}")
+            assignments_on_slot = list(set(pdu_map[pdu][slot])) # Use set to show unique assignments
+            if assignments_on_slot:
+                print(f"  Circuit {slot}: {', '.join(assignments_on_slot)}")
+            else:
+                print(f"  Circuit {slot}: empty")
 
 def generate_excel_output(normalized_solution, is_intermediate=False):
     """Generates the output Excel file from normalized solution data."""
@@ -696,7 +699,7 @@ def generate_excel_output(normalized_solution, is_intermediate=False):
     start_col = 27 if SPLIT_CIRCUITS else 19 # AA or S
 
     for i, asn in enumerate(normalized_solution):
-        output_row_data = [asn['prim_pdu'], asn['prim_ckt_norm'], asn['sec_pdu'], asn['sec_ckt_norm']]
+        output_row_data = [asn.get('prim_pdu'), asn.get('prim_ckt_norm'), asn.get('sec_pdu'), asn.get('sec_ckt_norm')]
         for j, value in enumerate(output_row_data):
             ws.cell(row=start_row + i, column=start_col + j, value=value)
 
@@ -730,6 +733,7 @@ if __name__ == "__main__":
             generate_excel_output(final_normalized_solution)
             if PRINT_PDU_SUMMARY:
                 print_pdu_summary(final_normalized_solution)
+            # Pass raw solution to quality check as it needs the original structure
             get_solution_quality(final_raw_solution, title="Final Solution Analysis", verbose=True)
 
     else: # NO-SPLIT MODE

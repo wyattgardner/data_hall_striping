@@ -1,3 +1,7 @@
 venv/
 *.xlsx
 data_hall_striping_OUTPUT.xlsm
+main.exe
+main.spec
+build/
+dist/

@@ -29,8 +29,8 @@ NUM_SEARCH_WORKERS = 16
 
 # --- Objective Weights for Scoring ---
 # Any penalty can be set to 0 if minimizing that aspect is not needed.
-OVERLOAD_WEIGHT = 20000  # Penalty for each 1kW of overload
-SPLIT_PENALTY_WEIGHT = 100  # Penalty for each circuit that is split (not used if SPLIT_CIRCUITS is false))
+OVERLOAD_WEIGHT = 20000  # Penalty for each 1 kW of overload
+SPLIT_PENALTY_WEIGHT = 100  # Penalty for each circuit that is split (not used if SPLIT_CIRCUITS is false)
 DISTANCE_PENALTY_WEIGHT = 0.5 # Penalty for each distance unit a circuit is away from its PDU
 
 # --- Final Report Options ---

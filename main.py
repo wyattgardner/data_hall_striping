@@ -11,6 +11,9 @@ import threading
 import shutil
 import openpyxl
 import sys
+import os
+BASE_DIR = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__)
+os.chdir(BASE_DIR)
 
 # ==============================================================================
 #                                 I. SOLVER SETTINGS

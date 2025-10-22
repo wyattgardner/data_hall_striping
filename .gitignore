@@ -1,7 +1,7 @@
 venv/
 *.xlsx
-data_hall_striping_OUTPUT.xlsm
-main.exe
-main.spec
-build/
-dist/
+*.xlsm
+!data_hall_striping.xlsm
+*.exe
+solver/build
+lib/

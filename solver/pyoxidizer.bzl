@@ -6,35 +6,36 @@ def make_exe():
     # Create the policy
     policy = dist.make_python_packaging_policy()
     
-    # 1. Set to "in-memory" for a single-file .exe
-    policy.resources_location = "in-memory"
+    # 1. This fixes the "__file__" error by creating a 'lib' directory.
+    policy.resources_location = "filesystem-relative:lib"
 
-    # --- FIX #1: Solve the runtime __file__ error ---
+    # --- THIS IS THE NEW FIX ---
+    # 2. Tell the scanner to find all files (.py, .dll, etc.).
+    #    (We REMOVED 'file_scanner_classify_files = False').
+    policy.file_scanner_emit_files = True
+    
+    # 3. Allow these generic files to be processed.
+    policy.allow_files = True
+    
+    # 4. This is the new, critical line:
+    #    Tell the packager to INCLUDE the generic files it found.
+    policy.include_file_resources = True
+    # --- END FIX ---
+
+
     python_config = dist.make_python_interpreter_config()
     python_config.run_module = "main"
 
-    # This tells the interpreter to unpack C-extensions to disk
-    # before importing, which fixes the NumPy/OR-Tools crash.
-    python_config.prefer_in_memory_imports = False
-    # --- END FIX #1 ---
-
     exe = dist.to_python_executable(
         name = "solver",
-        packaging_policy = policy, # Pass the configured policy
-        config = python_config,   # Pass the configured config
+        packaging_policy = policy, # Pass the fully configured policy
+        config = python_config,
     )
 
-    # --- FIX #2: Embed the necessary .dll/.pyd files ---
     # Install dependencies from requirements.txt
-    # 'include_non_python_files=True' is the correct syntax for v0.24.0
-    # to find and embed the files NumPy and OR-Tools need.
     exe.add_python_resources(
-        exe.pip_install(
-            ["-r", "../requirements.txt"],
-            include_non_python_files=True
-        )
+        exe.pip_install(["-r", "../requirements.txt"])
     )
-    # --- END FIX #2 ---
 
     # Include your main app code
     exe.add_python_resources(

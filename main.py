@@ -56,6 +56,12 @@ try:
     PDU_CAPACITY = ws['D10'].value
     UPS_CAPACITY = ws['D11'].value
 
+    if any(data is None for data in (SPLIT_CIRCUITS, NUM_ROWS, RACKS_PER_ROW,
+        NUM_LINEUPS, PDUS_PER_LINEUP, NUM_CIRCUITS_PER_PDU,
+        PDU_CAPACITY, UPS_CAPACITY
+    )):
+        raise Exception
+
 except FileNotFoundError:
     print(f"FATAL ERROR: Input file not found at '{INPUT_FILENAME}'. Please ensure it is in the same directory.")
     sys.exit(1)
@@ -63,7 +69,7 @@ except KeyError:
     print(f"FATAL ERROR: Worksheet '{DATA_SHEET_NAME}' not found in '{INPUT_FILENAME}'.")
     sys.exit(1)
 except Exception as e:
-    print(f"FATAL ERROR: Could not read setup data from Excel. Check cell formatting. Error: {e}")
+    print(f"FATAL ERROR: Could not read setup data from Excel. Check data input. Error: {e}")
     sys.exit(1)
 
 RACK_LOADS = {}

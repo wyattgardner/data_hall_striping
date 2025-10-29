@@ -1,7 +1,7 @@
 # This is the full and complete pyoxidizer.bzl file.
 
 def make_exe():
-    dist = default_python_distribution()
+    dist = default_python_distribution(flavor="standalone_dynamic")
 
     # Create the policy
     policy = dist.make_python_packaging_policy()

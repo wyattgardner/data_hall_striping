@@ -1,7 +1,6 @@
 venv/
 *.xlsx
 *.xlsm
-!data_hall_striping.xlsm
 *.exe
 solver/build
 lib/
